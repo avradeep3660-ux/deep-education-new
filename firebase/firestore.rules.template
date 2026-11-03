@@ -1,0 +1,116 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function profile() {
+      return get(/databases/$(database)/documents/userProfiles/$(request.auth.uid)).data;
+    }
+    function activeStudent() {
+      return signedIn() && profile().role == 'student' && profile().active == true;
+    }
+    function activeTeacher() {
+      return signedIn() && profile().role == 'teacher' && profile().active == true;
+    }
+    function teacherOrOwner() {
+      return activeTeacher() || (activeStudent() && resource.data.ownerUid == request.auth.uid);
+    }
+    function batchVisible(data) {
+      return activeTeacher() || (activeStudent() && (!('batch' in data) || data.batch == 'ALL' || data.batch == profile().batch));
+    }
+
+    // A student may create only their own student-role profile. Teacher role is
+    // assigned only by trusted Admin SDK code/custom claims.
+    match /userProfiles/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || activeTeacher());
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role == 'student'
+        && request.resource.data.active == true;
+      allow update: if signedIn() && request.auth.uid == uid
+        && resource.data.role == 'student'
+        && request.resource.data.role == 'student';
+      allow delete: if activeTeacher();
+    }
+
+    match /deep_students_permanent_v3/{studentId} {
+      allow read: if activeTeacher() || (activeStudent() && resource.data.authUid == request.auth.uid);
+      allow create: if activeStudent() && request.resource.data.authUid == request.auth.uid;
+      allow update: if activeTeacher() || (activeStudent() && resource.data.authUid == request.auth.uid && request.resource.data.authUid == request.auth.uid);
+      allow delete: if activeTeacher();
+    }
+
+    match /pdfs/{pdfId} {
+      allow read: if batchVisible(resource.data);
+      allow create, update, delete: if activeTeacher();
+    }
+
+    match /student_push_tokens/{tokenId} {
+      allow create, update: if activeStudent()
+        && request.resource.data.authUid == request.auth.uid
+        && request.resource.data.studentId == profile().studentId;
+      allow read, delete: if activeTeacher() || (activeStudent() && resource.data.authUid == request.auth.uid);
+    }
+
+    match /deep_notifications_permanent_v3/{notificationId} {
+      allow create, update, delete: if activeTeacher();
+      allow read: if activeTeacher() || (activeStudent() && (
+        resource.data.studentId == profile().studentId ||
+        (resource.data.studentId == 'ALL' && (!('targetBatch' in resource.data) || resource.data.targetBatch == 'ALL' || resource.data.targetBatch == profile().batch))
+      ));
+    }
+
+    match /deep_mock_tests_permanent_v3/{id} {
+      allow read: if batchVisible(resource.data);
+      allow create, update, delete: if activeTeacher();
+    }
+    match /deep_recordings_permanent_v3/{id} {
+      allow read: if batchVisible(resource.data);
+      allow create, update, delete: if activeTeacher();
+    }
+    match /live_classes/{id} {
+      allow read: if batchVisible(resource.data);
+      allow create, update, delete: if activeTeacher();
+    }
+    match /notices/{id} {
+      allow read: if signedIn();
+      allow create, update, delete: if activeTeacher();
+    }
+    match /deep_portal_settings_v3/{id} {
+      allow read: if signedIn();
+      allow write: if activeTeacher();
+    }
+
+    // Every student-owned record must carry ownerUid before these rules are
+    // enabled. Teacher retains administrative access; students see only their
+    // own records. No broad authenticated-user collection reads are allowed.
+    match /deep_attendance_permanent_v3/{id} {
+      allow read: if teacherOrOwner();
+      allow create, update: if activeTeacher();
+      allow delete: if activeTeacher();
+    }
+    match /deep_fees_permanent_v3/{id} {
+      allow read: if teacherOrOwner();
+      allow create, update, delete: if activeTeacher();
+    }
+    match /deep_feedbacks_permanent_v3/{id} {
+      allow read: if teacherOrOwner();
+      allow create: if activeStudent() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if activeTeacher();
+    }
+    match /deep_doubts_permanent_v3/{id} {
+      allow read: if teacherOrOwner();
+      allow create: if activeStudent() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if activeTeacher();
+    }
+    match /deep_livechat_permanent_v3/{id} {
+      allow read: if signedIn();
+      allow create: if activeStudent() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if activeTeacher();
+    }
+    match /deep_polls_permanent_v3/{id} {
+      allow read: if signedIn();
+      allow create, update, delete: if activeTeacher();
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

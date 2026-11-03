@@ -1,0 +1,23 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function profile() {
+      return firestore.get(/databases/(default)/documents/userProfiles/$(request.auth.uid)).data;
+    }
+    function activeTeacher() {
+      return signedIn() && profile().role == 'teacher' && profile().active == true;
+    }
+    function activeStudent() {
+      return signedIn() && profile().role == 'student' && profile().active == true;
+    }
+    match /encrypted-pdfs/{batch}/{fileName} {
+      allow read: if activeTeacher() || (activeStudent() && (batch == 'ALL' || batch == profile().batch));
+      allow create, update: if activeTeacher()
+        && request.resource.size < 30 * 1024 * 1024
+        && request.resource.contentType == 'application/octet-stream';
+      allow delete: if activeTeacher();
+    }
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
