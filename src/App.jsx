@@ -10,7 +10,7 @@ import {
   BarChart3, Filter, AlertTriangle, HelpCircle, Award, Sparkles,
   Star, Edit3, CreditCard, DollarSign, LayoutDashboard, User,
   Key, Brain, MessageSquare, PlayCircle, Share2, Send, Mail,
-  MessageCircle, FileCheck
+  MessageCircle, FileCheck, XCircle
 } from 'lucide-react';
 
 const STUDENTS_COL = "deep_students_permanent_v3";
@@ -36,7 +36,6 @@ const BATCH_OPTIONS = [
   "B.Sc Honours Batch"
 ];
 
-// ─── Google Meet helper ─────────────────────────────────────────────────────
 const openMeetLink = (link) => {
   if (link && typeof link === 'string' && link.startsWith('http')) {
     window.open(link, '_blank', 'noopener,noreferrer');
@@ -329,6 +328,9 @@ const getCurrentMonthISO = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
+// Match threshold for face recognition (Lower is stricter. 12.0 is balanced for 32x32)
+const MATCH_THRESHOLD = 12.0;
+
 export default function App() {
   const [session, setSession] = useState(() => {
     try {
@@ -488,6 +490,13 @@ export default function App() {
 
   useEffect(() => { userAnswersRef.current = userAnswers; }, [userAnswers]);
 
+  // CLEANUP CAMERA STREAM ON UNMOUNT OR TAB CHANGE
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, [teacherNavTab]);
+
   useEffect(() => {
     let sessionToStore = session;
     if (session && session.user) {
@@ -544,7 +553,6 @@ export default function App() {
 
   useEffect(() => {
     if (examTimeLeft === 0 && activeTest && !testResult) finalizeExam(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examTimeLeft, activeTest, testResult]);
 
   useEffect(() => {
@@ -553,7 +561,6 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTest, testResult]);
 
   const fetchAllPortalData = async () => {
@@ -1046,20 +1053,32 @@ export default function App() {
     }
   };
 
+  // --- UPDATED ATTENDANCE SCANNER LOGIC ---
   const openTeacherAttendanceScanner = () => {
-    const enrolled = students.filter(s => s.facePhoto && s.faceSignature);
-    if (enrolled.length === 0) { alert('No student faces registered yet!'); return; }
+    const todayIso = getTodayISO();
+    // Filter out students who are ALREADY marked present today
+    const presentTodayIds = new Set(attendanceLogs.filter(l => l.isoDate === todayIso).map(l => l.studentId));
+    const enrolled = students.filter(s => s.facePhoto && s.faceSignature && !presentTodayIds.has(s.id));
+
+    if (enrolled.length === 0) { 
+      alert('All registered students are already marked present today, or no faces are registered!'); 
+      return; 
+    }
+    
     setDetectedStudent(null); setCapturedProofPhoto(null);
     setAttendanceScannerOpen(true); setIsScanning(true);
     skippedStudentIdsRef.current = [];
+    
     setTimeout(async () => {
       await startCameraStream();
       if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
+      
       scanIntervalRef.current = setInterval(() => {
         if (videoRef.current && videoRef.current.readyState === 4) {
           const liveSig = getFaceSignature(videoRef.current);
           const liveCenterSig = getCenteredFaceSignature(videoRef.current);
           let bestMatch = null, lowestScore = Infinity;
+          
           enrolled.forEach(st => {
             if (skippedStudentIdsRef.current.includes(st.id)) return;
             let score = compareSignatures(liveSig, st.faceSignature);
@@ -1069,7 +1088,9 @@ export default function App() {
             }
             if (score < lowestScore) { lowestScore = score; bestMatch = st; }
           });
-          if (bestMatch) {
+
+          // ONLY ACCEPT IF SCORE IS BELOW THRESHOLD (Accurate Match)
+          if (bestMatch && lowestScore < MATCH_THRESHOLD) {
             const now = new Date();
             setCapturedProofPhoto(capturePhotoDataUrl());
             setDetectedStudent(bestMatch);
@@ -1077,6 +1098,9 @@ export default function App() {
               date: now.toLocaleDateString('en-IN'),
               time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             });
+            
+            // STOP CAMERA LOOP TO PREVENT FREEZING
+            if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
             setIsScanning(false);
           } else if (skippedStudentIdsRef.current.length > 0) {
             skippedStudentIdsRef.current = [];
@@ -1089,6 +1113,8 @@ export default function App() {
   const handleNotMeCycleNext = () => {
     if (detectedStudent) skippedStudentIdsRef.current = [...skippedStudentIdsRef.current, detectedStudent.id];
     setDetectedStudent(null); setCapturedProofPhoto(null); setIsScanning(true);
+    // Restart the scanner loop
+    openTeacherAttendanceScanner();
   };
 
   const confirmAndMarkAttendance = async () => {
@@ -1115,14 +1141,24 @@ export default function App() {
       try {
         const docRef = await addDoc(collection(db, ATTENDANCE_COL), encryptedRecord);
         const notifRef = await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
+        
+        // Add to global state immediately so scanner filters them next time
         setAttendanceLogs(prev => [{ id: docRef.id, ...plainRecord }, ...prev]);
         setStudentNotifications(prev => [{ id: notifRef.id, ...notifPayload }, ...prev]);
+        
         triggerDevicePushNotification(`Attendance Confirmed: ${detectedStudent.name} ✓`, `Today's attendance successfully marked at ${displayTime}.`);
         setIsSavingAttendance(false);
         alert(`Attendance marked successfully for ${detectedStudent.name}!`);
+        
+        // Restart Scanner for next student
         skippedStudentIdsRef.current = [];
-        setDetectedStudent(null); setCapturedProofPhoto(null); setIsScanning(true);
-      } catch (err) { setIsSavingAttendance(false); alert('Error: ' + err.message); }
+        setDetectedStudent(null); setCapturedProofPhoto(null); 
+        openTeacherAttendanceScanner(); 
+        
+      } catch (err) { 
+        setIsSavingAttendance(false); 
+        alert('Error: ' + err.message); 
+      }
     };
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -1131,6 +1167,16 @@ export default function App() {
         { enableHighAccuracy: true, timeout: 5000 }
       );
     } else { saveToFirestore('Deep Education Center, Madanpur'); }
+  };
+
+  // NEW: Mark Student Absent (Remove fake attendance)
+  const handleMarkAttendanceAbsent = async (logId, studentName) => {
+    if (!window.confirm(`Are you sure you want to mark ${studentName} as ABSENT and remove their attendance?`)) return;
+    try {
+      await deleteDoc(doc(db, ATTENDANCE_COL, logId));
+      setAttendanceLogs(prev => prev.filter(l => l.id !== logId));
+      alert(`Attendance removed. ${studentName} is now marked ABSENT for today.`);
+    } catch (err) { alert('Error removing attendance: ' + err.message); }
   };
 
   const broadcastPushNotification = async (titleText, bodyText, targetBatch = 'ALL') => {
@@ -1576,9 +1622,6 @@ export default function App() {
     } catch (err) { alert(`PDF ডিলিট করা যায়নি: ${err.message}`); }
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // GOOGLE MEET LIVE CLASS — save link, open in new tab
-  // ═══════════════════════════════════════════════════════════════════════════
   const handleAddLiveClass = async (e) => {
     e.preventDefault();
     if (!newClassTitle.trim()) { alert('অনুগ্রহ করে ক্লাসের টপিক (Topic) লিখুন!'); return; }
@@ -1599,7 +1642,6 @@ export default function App() {
       setLiveClasses([{ id: docRef.id, ...payload }, ...liveClasses]);
       broadcastPushNotification("লাইভ ক্লাস শুরু হয়েছে! 🔴", `টপিক: ${payload.title}। এখনই পোর্টালে ঢুকে জয়েন করো!`, payload.batch);
       setNewClassTitle(''); setNewClassTime(''); setNewClassLink('');
-      // Open Meet in a new tab for the teacher
       window.open(payload.link, '_blank', 'noopener,noreferrer');
     } catch (err) { alert('Error: ' + err.message); }
   };
@@ -2577,7 +2619,7 @@ export default function App() {
                     <div className="overflow-x-auto rounded-2xl border border-white/10">
                       <table className="w-full text-left text-sm text-slate-300">
                         <thead className="bg-black/40 text-emerald-300 uppercase text-[10px] border-b border-white/10">
-                          <tr><th className="p-3.5">Student</th><th className="p-3.5">Batch</th><th className="p-3.5">Time</th><th className="p-3.5">Location</th></tr>
+                          <tr><th className="p-3.5">Student</th><th className="p-3.5">Batch</th><th className="p-3.5">Time</th><th className="p-3.5">Location</th><th className="p-3.5 text-center">Action</th></tr>
                         </thead>
                         <tbody className="divide-y divide-white/5 bg-black/20">
                           {logsForSelectedDate.map(log => (
@@ -2586,6 +2628,12 @@ export default function App() {
                               <td className="p-3.5 text-violet-300 text-xs">{log.batch}</td>
                               <td className="p-3.5 text-emerald-400 font-bold text-xs">{log.time}</td>
                               <td className="p-3.5 text-[11px] text-slate-400">{log.location}</td>
+                              <td className="p-3.5 text-center">
+                                <button onClick={() => handleMarkAttendanceAbsent(log.id, log.name)}
+                                  className="bg-rose-500/20 text-rose-400 hover:bg-rose-500/40 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center justify-center gap-1 mx-auto">
+                                  <Trash2 size={12} /> Mark Absent
+                                </button>
+                              </td>
                             </tr>
                           ))}
                         </tbody>
