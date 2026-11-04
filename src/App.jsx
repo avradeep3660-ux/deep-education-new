@@ -328,7 +328,8 @@ const getCurrentMonthISO = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-const MATCH_THRESHOLD = 12.0;
+// Face match threshold (increased to 25.0 for better accuracy in varied lighting)
+const MATCH_THRESHOLD = 25.0;
 
 export default function App() {
   // Netlify Badge Remover
@@ -487,6 +488,9 @@ export default function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [capturedProofPhoto, setCapturedProofPhoto] = useState(null);
   const [isSavingAttendance, setIsSavingAttendance] = useState(false);
+  
+  // New state for Live Attendance Debug Text
+  const [scanDebugText, setScanDebugText] = useState('');
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -498,9 +502,8 @@ export default function App() {
   const userAnswersRef = useRef(userAnswers);
   const examSubmittedRef = useRef(false);
 
-  // ─── REAL-TIME LISTENERS (REPLACES fetchAllPortalData) ─────────────────────
+  // ─── REAL-TIME LISTENERS ─────────────────────
 
-  // 1. STUDENTS
   useEffect(() => {
     const unsub = onSnapshot(collection(db, STUDENTS_COL), (snap) => {
       const cloudStudents = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, STUDENT_ENCRYPTED_FIELDS, STUDENT_ENCRYPTED_ARRAYS));
@@ -511,7 +514,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 2. FEES
   useEffect(() => {
     const unsub = onSnapshot(collection(db, FEES_COL), (snap) => {
       setFeesRecords(snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEE_ENCRYPTED_FIELDS)));
@@ -519,7 +521,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 3. LIVE CLASSES
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'live_classes'), (snap) => {
       setLiveClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -527,7 +528,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 4. RECORDED CLASSES
   useEffect(() => {
     const unsub = onSnapshot(collection(db, RECORDINGS_COL), (snap) => {
       setRecordedClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -535,7 +535,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 5. LIVE CHAT
   useEffect(() => {
     const unsub = onSnapshot(collection(db, LIVECHAT_COL), (snap) => {
       const loadedChat = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, CHAT_ENCRYPTED_FIELDS));
@@ -545,7 +544,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 6. POLLS
   useEffect(() => {
     const unsub = onSnapshot(collection(db, POLLS_COL), (snap) => {
       setPollsList(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -553,7 +551,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 7. DOUBTS
   useEffect(() => {
     const unsub = onSnapshot(collection(db, DOUBTS_COL), (snap) => {
       const loadedDoubts = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, DOUBT_ENCRYPTED_FIELDS));
@@ -563,7 +560,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 8. NOTICES
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'notices'), (snap) => {
       const loadedNotices = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -572,7 +568,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 9. MOCK TESTS
   useEffect(() => {
     const unsub = onSnapshot(collection(db, MOCKTEST_COL), (snap) => {
       setMockTests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -580,7 +575,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 10. FEEDBACKS
   useEffect(() => {
     const unsub = onSnapshot(collection(db, FEEDBACK_COL), (snap) => {
       setFeedbacksList(snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEEDBACK_ENCRYPTED_FIELDS)));
@@ -588,7 +582,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 11. ATTENDANCE
   useEffect(() => {
     const unsub = onSnapshot(collection(db, ATTENDANCE_COL), (snap) => {
       const loadedAtt = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, ATTENDANCE_ENCRYPTED_FIELDS));
@@ -598,7 +591,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 12. PDFs
   useEffect(() => {
     if (session.mode === 'teacher') {
       const unsub = onSnapshot(collection(db, 'pdfs'), (snap) => {
@@ -629,7 +621,6 @@ export default function App() {
     }
   }, [session.mode, session.user?.batch]);
 
-  // 13. NOTIFICATIONS
   useEffect(() => {
     if (session.mode === 'teacher') {
       const unsub = onSnapshot(collection(db, NOTIFICATIONS_COL), (snap) => {
@@ -659,7 +650,6 @@ export default function App() {
     }
   }, [session.mode, session.user?.id, session.user?.batch]);
 
-  // 14. EXAM COUNTDOWN
   useEffect(() => {
     const unsub = onSnapshot(doc(db, PORTAL_SETTINGS_COL, 'exam_countdown'), (docSnap) => {
       if (docSnap.exists()) {
@@ -832,10 +822,18 @@ export default function App() {
 
   const startCameraStream = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 480, height: 480 } });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
       streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) { alert('Camera access denied!'); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play().catch(e => console.log("Video play error:", e));
+        };
+      }
+    } catch (err) { 
+      console.error(err);
+      alert('Camera access denied! Please allow camera permission.'); 
+    }
   };
 
   const stopCameraStream = () => {
@@ -843,6 +841,7 @@ export default function App() {
     if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
     setTeacherCameraOpen(false); setAttendanceScannerOpen(false); setIsScanning(false);
     setIsRegisteringFaceScan(false); setFaceRegProgress(0); setDetectedStudent(null);
+    setScanDebugText('');
     skippedStudentIdsRef.current = [];
   };
 
@@ -967,7 +966,7 @@ export default function App() {
     const totalTicks = 20;
     if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
     scanIntervalRef.current = setInterval(async () => {
-      if (!videoRef.current || videoRef.current.readyState !== 4) return;
+      if (!videoRef.current || videoRef.current.readyState < 2) return;
       ticks++;
       collectedSigs.push(getFaceSignature(videoRef.current));
       collectedCenterSigs.push(getCenteredFaceSignature(videoRef.current));
@@ -1076,6 +1075,7 @@ export default function App() {
     }
   };
 
+  // FIXED: Live Attendance Scanner Logic
   const openTeacherAttendanceScanner = () => {
     const todayIso = getTodayISO();
     const presentTodayIds = new Set(attendanceLogs.filter(l => l.isoDate === todayIso).map(l => l.studentId));
@@ -1095,7 +1095,7 @@ export default function App() {
       if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
       
       scanIntervalRef.current = setInterval(() => {
-        if (videoRef.current && videoRef.current.readyState === 4) {
+        if (videoRef.current && videoRef.current.readyState >= 2 && videoRef.current.videoWidth > 0) {
           const liveSig = getFaceSignature(videoRef.current);
           const liveCenterSig = getCenteredFaceSignature(videoRef.current);
           let bestMatch = null, lowestScore = Infinity;
@@ -1109,6 +1109,8 @@ export default function App() {
             }
             if (score < lowestScore) { lowestScore = score; bestMatch = st; }
           });
+
+          setScanDebugText(`Match Score: ${lowestScore.toFixed(1)} (Target < ${MATCH_THRESHOLD})`);
 
           if (bestMatch && lowestScore < MATCH_THRESHOLD) {
             const now = new Date();
@@ -1125,8 +1127,8 @@ export default function App() {
             skippedStudentIdsRef.current = [];
           }
         }
-      }, 1500);
-    }, 300);
+      }, 1000); // 1 second interval to let camera stabilize
+    }, 1000);
   };
 
   const handleNotMeCycleNext = () => {
@@ -2569,6 +2571,10 @@ export default function App() {
                     <div className="relative mx-auto w-64 h-64 bg-black rounded-3xl overflow-hidden border-4 border-emerald-500/60">
                       <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
                       <div className="absolute inset-4 border-2 border-dashed border-emerald-400/80 rounded-full pointer-events-none" />
+                      {/* NEW: Debug Text */}
+                      <div className="absolute inset-x-0 bottom-0 bg-black/80 text-center text-xs font-mono text-emerald-400 py-1">
+                        {scanDebugText}
+                      </div>
                     </div>
                     <canvas ref={canvasRef} className="hidden" />
                     {detectedStudent && (
@@ -2943,7 +2949,6 @@ export default function App() {
                 className="rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/40 px-4 py-2 text-xs font-bold">Close</button>
             </div>
 
-            {/* Summary Cards */}
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 p-4">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Total Paid</p>
@@ -2959,7 +2964,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* History List */}
             <div className="overflow-x-auto rounded-2xl border border-white/10 max-h-[400px]">
               <table className="w-full text-left text-sm text-slate-300">
                 <thead className="bg-black/40 text-violet-300 uppercase text-[10px] border-b border-white/10 sticky top-0">
