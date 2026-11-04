@@ -328,11 +328,9 @@ const getCurrentMonthISO = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-// Face match threshold (increased to 25.0 for better accuracy in varied lighting)
-const MATCH_THRESHOLD = 25.0;
+const MATCH_THRESHOLD = 45.0;
 
 export default function App() {
-  // Netlify Badge Remover
   useEffect(() => {
     const removeNetlifyBadge = () => {
       const badge = document.querySelector('iframe[src*="netlify"]') || 
@@ -488,9 +486,10 @@ export default function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [capturedProofPhoto, setCapturedProofPhoto] = useState(null);
   const [isSavingAttendance, setIsSavingAttendance] = useState(false);
-  
-  // New state for Live Attendance Debug Text
   const [scanDebugText, setScanDebugText] = useState('');
+  
+  // NEW: Camera Switch State
+  const [cameraFacingMode, setCameraFacingMode] = useState('user');
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -501,8 +500,6 @@ export default function App() {
   const recVideoPlayerRef = useRef(null);
   const userAnswersRef = useRef(userAnswers);
   const examSubmittedRef = useRef(false);
-
-  // ─── REAL-TIME LISTENERS ─────────────────────
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, STUDENTS_COL), (snap) => {
@@ -744,6 +741,12 @@ export default function App() {
     try { await setDoc(doc(db, PORTAL_SETTINGS_COL, 'exam_countdown'), updatedExamObj); } catch (e) {}
   };
 
+  const handlePublishSettings = async () => {
+    await handleSaveExamCountdownFromTeacher(examCountdown);
+    localStorage.setItem('deep_contact_info_v3', JSON.stringify(contactInfo));
+    alert('Exam countdown & contact details published successfully!');
+  };
+
   const handleWipeAllOldData = async () => {
     if (!window.confirm("Permanently DELETE all students and records from Firebase?")) return;
     setIsWipingData(true);
@@ -820,9 +823,12 @@ export default function App() {
     } catch (err) { alert('Error updating certificate status: ' + err.message); }
   };
 
-  const startCameraStream = async () => {
+  const startCameraStream = async (mode = cameraFacingMode) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: mode } });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -832,8 +838,14 @@ export default function App() {
       }
     } catch (err) { 
       console.error(err);
-      alert('Camera access denied! Please allow camera permission.'); 
+      alert('Camera access denied or not available.'); 
     }
+  };
+
+  const handleSwitchCamera = () => {
+    const newMode = cameraFacingMode === 'user' ? 'environment' : 'user';
+    setCameraFacingMode(newMode);
+    startCameraStream(newMode);
   };
 
   const stopCameraStream = () => {
@@ -1075,7 +1087,6 @@ export default function App() {
     }
   };
 
-  // FIXED: Live Attendance Scanner Logic
   const openTeacherAttendanceScanner = () => {
     const todayIso = getTodayISO();
     const presentTodayIds = new Set(attendanceLogs.filter(l => l.isoDate === todayIso).map(l => l.studentId));
@@ -1088,6 +1099,7 @@ export default function App() {
     
     setDetectedStudent(null); setCapturedProofPhoto(null);
     setAttendanceScannerOpen(true); setIsScanning(true);
+    setScanDebugText('Scanning... Please look at the camera.');
     skippedStudentIdsRef.current = [];
     
     setTimeout(async () => {
@@ -1110,9 +1122,8 @@ export default function App() {
             if (score < lowestScore) { lowestScore = score; bestMatch = st; }
           });
 
-          setScanDebugText(`Match Score: ${lowestScore.toFixed(1)} (Target < ${MATCH_THRESHOLD})`);
-
           if (bestMatch && lowestScore < MATCH_THRESHOLD) {
+            setScanDebugText(`✅ ${bestMatch.name} Recognized!`);
             const now = new Date();
             setCapturedProofPhoto(capturePhotoDataUrl());
             setDetectedStudent(bestMatch);
@@ -1123,11 +1134,19 @@ export default function App() {
             
             if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
             setIsScanning(false);
-          } else if (skippedStudentIdsRef.current.length > 0) {
-            skippedStudentIdsRef.current = [];
+          } else {
+            if (lowestScore === Infinity) {
+              setScanDebugText('⚠️ No face detected. Please face the camera.');
+            } else {
+              setScanDebugText(`❌ Face Not Matched (Score: ${lowestScore.toFixed(1)}). Adjust lighting/position.`);
+            }
+            
+            if (skippedStudentIdsRef.current.length > 0) {
+              skippedStudentIdsRef.current = [];
+            }
           }
         }
-      }, 1000); // 1 second interval to let camera stabilize
+      }, 1000); 
     }, 1000);
   };
 
@@ -1739,7 +1758,6 @@ export default function App() {
         <div className="absolute -bottom-40 -right-40 w-[720px] h-[720px] bg-cyan-500/20 rounded-full blur-[160px] aurora-b" />
       </div>
 
-      {/* HEADER */}
       <header className="sticky top-0 z-40 glass-deep border-b border-white/[0.06]">
         <div className="max-w-7xl mx-auto px-4 md:px-6 py-3.5 flex justify-between items-center">
           <div className="flex items-center gap-3">
@@ -2505,9 +2523,14 @@ export default function App() {
                 </div>
                 {teacherCameraOpen && (
                   <div className="rounded-3xl bg-black/40 border border-violet-500/40 p-6 text-center space-y-4">
-                    <div className="flex justify-between">
+                    <div className="flex justify-between items-center">
                       <h3 className="text-sm font-bold text-white">Registering: <span className="text-violet-300">{students.find(s => s.id === selectedStudentIdForFace)?.name}</span></h3>
-                      <button onClick={stopCameraStream} className="text-xs text-rose-400 font-bold">Close</button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={handleSwitchCamera} className="text-xs bg-violet-500/20 text-violet-300 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1">
+                          <RefreshCw size={12} /> Flip
+                        </button>
+                        <button onClick={stopCameraStream} className="text-xs bg-rose-500/20 text-rose-400 px-3 py-1.5 rounded-lg font-bold">Close</button>
+                      </div>
                     </div>
                     <div className="relative mx-auto w-64 h-64 bg-black rounded-2xl overflow-hidden border-2 border-violet-400">
                       <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
@@ -2564,15 +2587,23 @@ export default function App() {
                 </div>
                 {attendanceScannerOpen && (
                   <div className="rounded-3xl bg-black/40 border border-emerald-500/40 p-6 text-center space-y-4">
-                    <div className="flex justify-between">
+                    <div className="flex justify-between items-center">
                       <span className="text-[10px] bg-emerald-500/15 text-emerald-300 px-3 py-1 rounded-full font-bold">Scanner Active</span>
-                      <button onClick={stopCameraStream} className="text-xs text-rose-400 font-bold">Close</button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={handleSwitchCamera} className="text-xs bg-violet-500/20 text-violet-300 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1">
+                          <RefreshCw size={12} /> Flip
+                        </button>
+                        <button onClick={stopCameraStream} className="text-xs bg-rose-500/20 text-rose-400 px-3 py-1.5 rounded-lg font-bold">Close</button>
+                      </div>
                     </div>
                     <div className="relative mx-auto w-64 h-64 bg-black rounded-3xl overflow-hidden border-4 border-emerald-500/60">
                       <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
                       <div className="absolute inset-4 border-2 border-dashed border-emerald-400/80 rounded-full pointer-events-none" />
-                      {/* NEW: Debug Text */}
-                      <div className="absolute inset-x-0 bottom-0 bg-black/80 text-center text-xs font-mono text-emerald-400 py-1">
+                      <div className={`absolute inset-x-0 bottom-0 text-center text-xs font-bold py-2 px-1 transition-colors ${
+                        detectedStudent ? 'bg-emerald-500/90 text-slate-950' :
+                        scanDebugText.includes('❌') ? 'bg-rose-500/90 text-white' :
+                        'bg-black/80 text-amber-300'
+                      }`}>
                         {scanDebugText}
                       </div>
                     </div>
@@ -2750,7 +2781,6 @@ export default function App() {
             {teacherNavTab === 'materials' && (
               <div className="space-y-5 anim-fade">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                  {/* PDF Upload */}
                   <div className="rounded-3xl glass-card p-5 space-y-3">
                     <h3 className="text-sm font-black text-emerald-300"><FileText size={16} className="inline mr-1" /> Upload PDF</h3>
                     <input type="text" placeholder="PDF Title..." value={pdfTitleInput} onChange={(e) => setPdfTitleInput(e.target.value)}
@@ -2769,7 +2799,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Google Meet Live Class */}
                   <div className="rounded-3xl glass-card p-5 space-y-3">
                     <h3 className="text-sm font-black text-rose-300"><Video size={16} className="inline mr-1" /> Start Live Class</h3>
                     <p className="text-[10px] text-emerald-400 font-semibold">
@@ -2802,7 +2831,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Notices */}
                   <div className="rounded-3xl glass-card p-5 space-y-3">
                     <h3 className="text-sm font-black text-violet-300"><Bell size={16} className="inline mr-1" /> Post Notice</h3>
                     <form onSubmit={handleAddNotice} className="space-y-2">
@@ -2863,22 +2891,27 @@ export default function App() {
                   <div className="rounded-3xl glass-card p-5 space-y-2.5">
                     <h3 className="text-sm font-black text-violet-300"><Calendar size={16} className="inline mr-1" /> Exam & Contact</h3>
                     <input type="text" placeholder="Exam name" value={examCountdown.title}
-                      onChange={(e) => handleSaveExamCountdownFromTeacher({ ...examCountdown, title: e.target.value })}
+                      onChange={(e) => setExamCountdown({ ...examCountdown, title: e.target.value })}
                       className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-xs text-white" />
                     <input type="date" value={examCountdown.date}
-                      onChange={(e) => handleSaveExamCountdownFromTeacher({ ...examCountdown, date: e.target.value })}
+                      onChange={(e) => setExamCountdown({ ...examCountdown, date: e.target.value })}
                       className="w-full rounded-xl bg-black/40 border border-violet-500/40 px-3 py-2 text-xs text-white font-bold" />
                     <div className="pt-2 border-t border-white/10 space-y-1.5">
                       <input type="text" placeholder="Call number" value={contactInfo.phone}
-                        onChange={(e) => { const next = { ...contactInfo, phone: e.target.value }; setContactInfo(next); localStorage.setItem('deep_contact_info_v3', JSON.stringify(next)); }}
+                        onChange={(e) => setContactInfo({ ...contactInfo, phone: e.target.value })}
                         className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-xs text-white" />
                       <input type="text" placeholder="WhatsApp (with 91)" value={contactInfo.whatsapp}
-                        onChange={(e) => { const next = { ...contactInfo, whatsapp: e.target.value }; setContactInfo(next); localStorage.setItem('deep_contact_info_v3', JSON.stringify(next)); }}
+                        onChange={(e) => setContactInfo({ ...contactInfo, whatsapp: e.target.value })}
                         className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-xs text-white" />
                       <input type="email" placeholder="Email" value={contactInfo.email}
-                        onChange={(e) => { const next = { ...contactInfo, email: e.target.value }; setContactInfo(next); localStorage.setItem('deep_contact_info_v3', JSON.stringify(next)); }}
+                        onChange={(e) => setContactInfo({ ...contactInfo, email: e.target.value })}
                         className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-xs text-white" />
                     </div>
+                    <button 
+                      onClick={handlePublishSettings}
+                      className="shine-btn w-full rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white font-black py-2.5 text-sm shadow-lg glow-violet mt-2">
+                      Save & Publish Details
+                    </button>
                   </div>
                 </div>
               </div>
