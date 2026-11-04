@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db } from './firebase.js';
-import { onSnapshot, query, where } from 'firebase/firestore';
+import { onSnapshot, query, where, collection, doc } from 'firebase/firestore';
 import { enableStudentPushNotifications } from './push.js';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
+import { getDocs, addDoc, updateDoc, deleteDoc, setDoc } from 'firebase/firestore';
 import {
   BookOpen, Users, Video, FileText, Bell, Camera, LogOut,
   Download, Clock, Trash2, Eye, UserPlus, CheckCircle,
@@ -10,7 +10,7 @@ import {
   BarChart3, Filter, AlertTriangle, HelpCircle, Award, Sparkles,
   Star, Edit3, CreditCard, DollarSign, LayoutDashboard, User,
   Key, Brain, MessageSquare, PlayCircle, Share2, Send, Mail,
-  MessageCircle, FileCheck, XCircle
+  MessageCircle, FileCheck, XCircle, History
 } from 'lucide-react';
 
 const STUDENTS_COL = "deep_students_permanent_v3";
@@ -328,10 +328,23 @@ const getCurrentMonthISO = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-// Match threshold for face recognition (Lower is stricter. 12.0 is balanced for 32x32)
 const MATCH_THRESHOLD = 12.0;
 
 export default function App() {
+  // Netlify Badge Remover
+  useEffect(() => {
+    const removeNetlifyBadge = () => {
+      const badge = document.querySelector('iframe[src*="netlify"]') || 
+                    document.getElementById('netlify-badge') || 
+                    document.querySelector('[data-netlify-badge]');
+      if (badge) badge.remove();
+    };
+    removeNetlifyBadge();
+    const observer = new MutationObserver(() => removeNetlifyBadge());
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
   const [session, setSession] = useState(() => {
     try {
       const saved = localStorage.getItem('deep_edu_active_session_final_v8');
@@ -381,6 +394,7 @@ export default function App() {
 
   const [feesRecords, setFeesRecords] = useState([]);
   const [managingFeeStudent, setManagingFeeStudent] = useState(null);
+  const [viewingFeeHistoryStudent, setViewingFeeHistoryStudent] = useState(null);
   const [feeMonthInput, setFeeMonthInput] = useState(getCurrentMonthISO());
   const [feeAmountInput, setFeeAmountInput] = useState('500');
   const [feeStatusInput, setFeeStatusInput] = useState('Paid');
@@ -484,13 +498,184 @@ export default function App() {
   const userAnswersRef = useRef(userAnswers);
   const examSubmittedRef = useRef(false);
 
+  // ─── REAL-TIME LISTENERS (REPLACES fetchAllPortalData) ─────────────────────
+
+  // 1. STUDENTS
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, STUDENTS_COL), (snap) => {
+      const cloudStudents = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, STUDENT_ENCRYPTED_FIELDS, STUDENT_ENCRYPTED_ARRAYS));
+      setStudents(cloudStudents);
+      persistStudents(cloudStudents);
+      setLoadingData(false);
+    }, (err) => console.error("Students sync error:", err));
+    return () => unsub();
+  }, []);
+
+  // 2. FEES
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, FEES_COL), (snap) => {
+      setFeesRecords(snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEE_ENCRYPTED_FIELDS)));
+    });
+    return () => unsub();
+  }, []);
+
+  // 3. LIVE CLASSES
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'live_classes'), (snap) => {
+      setLiveClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  // 4. RECORDED CLASSES
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, RECORDINGS_COL), (snap) => {
+      setRecordedClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  // 5. LIVE CHAT
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, LIVECHAT_COL), (snap) => {
+      const loadedChat = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, CHAT_ENCRYPTED_FIELDS));
+      loadedChat.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      setLiveChatMessages(loadedChat);
+    });
+    return () => unsub();
+  }, []);
+
+  // 6. POLLS
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, POLLS_COL), (snap) => {
+      setPollsList(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  // 7. DOUBTS
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, DOUBTS_COL), (snap) => {
+      const loadedDoubts = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, DOUBT_ENCRYPTED_FIELDS));
+      loadedDoubts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      setDoubtsList(loadedDoubts);
+    });
+    return () => unsub();
+  }, []);
+
+  // 8. NOTICES
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'notices'), (snap) => {
+      const loadedNotices = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setNotices(loadedNotices.length > 0 ? loadedNotices : [{ id: 'default-notice', title: 'Weekly Class Schedule', content: 'Check batch routine and mark attendance.', date: new Date().toLocaleDateString('en-IN') }]);
+    });
+    return () => unsub();
+  }, []);
+
+  // 9. MOCK TESTS
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, MOCKTEST_COL), (snap) => {
+      setMockTests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  // 10. FEEDBACKS
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, FEEDBACK_COL), (snap) => {
+      setFeedbacksList(snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEEDBACK_ENCRYPTED_FIELDS)));
+    });
+    return () => unsub();
+  }, []);
+
+  // 11. ATTENDANCE
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, ATTENDANCE_COL), (snap) => {
+      const loadedAtt = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, ATTENDANCE_ENCRYPTED_FIELDS));
+      loadedAtt.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      setAttendanceLogs(loadedAtt);
+    });
+    return () => unsub();
+  }, []);
+
+  // 12. PDFs
+  useEffect(() => {
+    if (session.mode === 'teacher') {
+      const unsub = onSnapshot(collection(db, 'pdfs'), (snap) => {
+        const records = snap.docs.map((item) => ({ id: item.id, ...item.data() }));
+        records.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        setPdfList(records);
+      });
+      return () => unsub();
+    }
+    
+    if (session.mode === 'student' && session.user?.batch) {
+      const received = new Map();
+      const publish = () => setPdfList([...received.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)));
+      
+      const q1 = query(collection(db, 'pdfs'), where('batch', '==', 'ALL'));
+      const q2 = query(collection(db, 'pdfs'), where('batch', '==', session.user.batch));
+      
+      const unsub1 = onSnapshot(q1, (snap) => {
+        snap.docs.forEach(d => received.set(d.id, { id: d.id, ...d.data() }));
+        publish();
+      });
+      const unsub2 = onSnapshot(q2, (snap) => {
+        snap.docs.forEach(d => received.set(d.id, { id: d.id, ...d.data() }));
+        publish();
+      });
+      
+      return () => { unsub1(); unsub2(); };
+    }
+  }, [session.mode, session.user?.batch]);
+
+  // 13. NOTIFICATIONS
+  useEffect(() => {
+    if (session.mode === 'teacher') {
+      const unsub = onSnapshot(collection(db, NOTIFICATIONS_COL), (snap) => {
+        const records = snap.docs.map((item) => ({ id: item.id, ...item.data() }));
+        records.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        setStudentNotifications(records);
+      });
+      return () => unsub();
+    }
+    
+    if (session.mode === 'student' && session.user?.id && session.user?.batch) {
+      const received = new Map();
+      const publish = () => {
+        const records = [...received.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        setStudentNotifications(records);
+      };
+      
+      const q1 = query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', session.user.id));
+      const q2 = query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', 'ALL'), where('targetBatch', '==', 'ALL'));
+      const q3 = query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', 'ALL'), where('targetBatch', '==', session.user.batch));
+      
+      const unsub1 = onSnapshot(q1, (snap) => { snap.docs.forEach(d => received.set(d.id, { id: d.id, ...d.data() })); publish(); });
+      const unsub2 = onSnapshot(q2, (snap) => { snap.docs.forEach(d => received.set(d.id, { id: d.id, ...d.data() })); publish(); });
+      const unsub3 = onSnapshot(q3, (snap) => { snap.docs.forEach(d => received.set(d.id, { id: d.id, ...d.data() })); publish(); });
+      
+      return () => { unsub1(); unsub2(); unsub3(); };
+    }
+  }, [session.mode, session.user?.id, session.user?.batch]);
+
+  // 14. EXAM COUNTDOWN
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, PORTAL_SETTINGS_COL, 'exam_countdown'), (docSnap) => {
+      if (docSnap.exists()) {
+        setExamCountdown(docSnap.data());
+        localStorage.setItem('deep_exam_countdown_local', JSON.stringify(docSnap.data()));
+      }
+    });
+    return () => unsub();
+  }, []);
+
   useEffect(() => {
     if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
   }, []);
 
   useEffect(() => { userAnswersRef.current = userAnswers; }, [userAnswers]);
 
-  // CLEANUP CAMERA STREAM ON UNMOUNT OR TAB CHANGE
   useEffect(() => {
     return () => {
       stopCameraStream();
@@ -563,139 +748,6 @@ export default function App() {
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [activeTest, testResult]);
 
-  const fetchAllPortalData = async () => {
-    setLoadingData(true);
-    let loadedStudents = [];
-    const localBackup = localStorage.getItem('deep_students_emergency_backup');
-    if (localBackup) {
-      try {
-        loadedStudents = JSON.parse(localBackup).map(s => decryptRecordFields(s, STUDENT_ENCRYPTED_FIELDS, STUDENT_ENCRYPTED_ARRAYS));
-        setStudents(loadedStudents);
-      } catch (e) {}
-    }
-    try {
-      const snap = await getDocs(collection(db, STUDENTS_COL));
-      const cloudStudents = snap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, STUDENT_ENCRYPTED_FIELDS, STUDENT_ENCRYPTED_ARRAYS));
-      if (cloudStudents.length > 0) {
-        loadedStudents = cloudStudents;
-        setStudents(cloudStudents);
-        persistStudents(cloudStudents);
-      } else if (loadedStudents.length > 0) {
-        for (const st of loadedStudents) {
-          const { id, ...dataToSave } = st;
-          const encryptedSt = encryptRecordFields(dataToSave, STUDENT_ENCRYPTED_FIELDS);
-          try { await addDoc(collection(db, STUDENTS_COL), encryptedSt); } catch (err) {}
-        }
-      }
-      const feeSnap = await getDocs(collection(db, FEES_COL));
-      setFeesRecords(feeSnap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEE_ENCRYPTED_FIELDS)));
-      const liveSnap = await getDocs(collection(db, 'live_classes'));
-      setLiveClasses(liveSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const recSnap = await getDocs(collection(db, RECORDINGS_COL));
-      setRecordedClasses(recSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const chatSnap = await getDocs(collection(db, LIVECHAT_COL));
-      const loadedChat = chatSnap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, CHAT_ENCRYPTED_FIELDS));
-      loadedChat.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      setLiveChatMessages(loadedChat);
-      const pollSnap = await getDocs(collection(db, POLLS_COL));
-      setPollsList(pollSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const doubtSnap = await getDocs(collection(db, DOUBTS_COL));
-      const loadedDoubts = doubtSnap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, DOUBT_ENCRYPTED_FIELDS));
-      loadedDoubts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      setDoubtsList(loadedDoubts);
-      const noticeSnap = await getDocs(collection(db, 'notices'));
-      const loadedNotices = noticeSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setNotices(loadedNotices.length > 0 ? loadedNotices : [{
-        id: 'default-notice', title: 'Weekly Class Schedule',
-        content: 'Check batch routine and mark attendance.', date: new Date().toLocaleDateString('en-IN')
-      }]);
-      const mockSnap = await getDocs(collection(db, MOCKTEST_COL));
-      setMockTests(mockSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const fbSnap = await getDocs(collection(db, FEEDBACK_COL));
-      setFeedbacksList(fbSnap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, FEEDBACK_ENCRYPTED_FIELDS)));
-      const attSnap = await getDocs(collection(db, ATTENDANCE_COL));
-      const loadedAtt = attSnap.docs.map(d => decryptRecordFields({ id: d.id, ...d.data() }, ATTENDANCE_ENCRYPTED_FIELDS));
-      loadedAtt.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      setAttendanceLogs(loadedAtt);
-      const notifSnap = await getDocs(collection(db, NOTIFICATIONS_COL));
-      const loadedNotifs = notifSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      loadedNotifs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      setStudentNotifications(loadedNotifs);
-      try {
-        const settingsSnap = await getDocs(collection(db, PORTAL_SETTINGS_COL));
-        const examDoc = settingsSnap.docs.find(d => d.id === 'exam_countdown');
-        if (examDoc) {
-          setExamCountdown(examDoc.data());
-          localStorage.setItem('deep_exam_countdown_local', JSON.stringify(examDoc.data()));
-        }
-      } catch (e) {}
-      if (session.mode === 'student' && session.user) {
-        const myLatestNotif = loadedNotifs.find(n => n.studentId === session.user.id || n.studentId === 'ALL');
-        const lastSeenNotifId = localStorage.getItem(`seen_notif_${session.user.id}`);
-        if (myLatestNotif && myLatestNotif.id !== lastSeenNotifId) {
-          setLivePushBanner(myLatestNotif);
-          triggerDevicePushNotification(myLatestNotif.title, myLatestNotif.message);
-          localStorage.setItem(`seen_notif_${session.user.id}`, myLatestNotif.id);
-        }
-      }
-    } catch (err) {
-      console.error("Error loading data:", err);
-      if (localBackup && loadedStudents.length === 0) {
-        try { setStudents(JSON.parse(localBackup).map(s => decryptRecordFields(s, STUDENT_ENCRYPTED_FIELDS, STUDENT_ENCRYPTED_ARRAYS))); } catch (e) {}
-      }
-    }
-    setLoadingData(false);
-  };
-
-  useEffect(() => { fetchAllPortalData(); }, [session.mode]);
-
-  useEffect(() => {
-    if (session.mode !== 'student' || !session.user?.batch) {
-      return onSnapshot(collection(db, 'pdfs'), (snapshot) => {
-        const records = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
-        records.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        setPdfList(records);
-      }, (error) => console.error('Realtime PDF sync failed:', error));
-    }
-    const received = new Map();
-    const publish = () => setPdfList([...received.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)));
-    const queries = [
-      query(collection(db, 'pdfs'), where('batch', '==', 'ALL')),
-      query(collection(db, 'pdfs'), where('batch', '==', session.user.batch))
-    ];
-    const unsubscribers = queries.map((q) => onSnapshot(q, (snapshot) => {
-      snapshot.docs.forEach((item) => received.set(item.id, { id: item.id, ...item.data() }));
-      publish();
-    }, (error) => console.error('Realtime student PDF sync failed:', error)));
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [session.mode, session.user?.batch]);
-
-  useEffect(() => {
-    if (session.mode === 'teacher') {
-      return onSnapshot(collection(db, NOTIFICATIONS_COL), (snapshot) => {
-        const records = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
-        records.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        setStudentNotifications(records);
-      }, (error) => console.error('Realtime notification sync failed:', error));
-    }
-    if (session.mode !== 'student' || !session.user?.id || !session.user?.batch) return undefined;
-    const received = new Map();
-    const publish = () => {
-      const records = [...received.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      setStudentNotifications(records);
-    };
-    const queries = [
-      query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', session.user.id)),
-      query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', 'ALL'), where('targetBatch', '==', 'ALL')),
-      query(collection(db, NOTIFICATIONS_COL), where('studentId', '==', 'ALL'), where('targetBatch', '==', session.user.batch))
-    ];
-    const unsubscribers = queries.map((q) => onSnapshot(q, (snapshot) => {
-      snapshot.docs.forEach((item) => received.set(item.id, { id: item.id, ...item.data() }));
-      publish();
-    }, (error) => console.error('Realtime student notification sync failed:', error)));
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [session.mode, session.user?.id, session.user?.batch]);
-
   const handleSaveExamCountdownFromTeacher = async (updatedExamObj) => {
     setExamCountdown(updatedExamObj);
     localStorage.setItem('deep_exam_countdown_local', JSON.stringify(updatedExamObj));
@@ -733,18 +785,12 @@ export default function App() {
     if (!window.confirm(`Delete ${name}?`)) return;
     try {
       await deleteDoc(doc(db, STUDENTS_COL, id));
-      const updated = students.filter(s => s.id !== id);
-      setStudents(updated);
-      persistStudents(updated);
     } catch (e) { alert("Error: " + e.message); }
   };
 
   const handleQuickGenderUpdate = async (studentId, newGender) => {
     try {
       await updateDoc(doc(db, STUDENTS_COL, studentId), { gender: encryptE2EE(newGender) });
-      const updated = students.map(s => s.id === studentId ? { ...s, gender: newGender } : s);
-      setStudents(updated);
-      persistStudents(updated);
     } catch (e) { alert("Error updating gender: " + e.message); }
   };
 
@@ -768,11 +814,6 @@ export default function App() {
       await updateDoc(doc(db, STUDENTS_COL, st.id), {
         certificateIssued: nextStatus, certificateIssuedDate: issuedDate
       });
-      const updated = students.map(item =>
-        item.id === st.id ? { ...item, certificateIssued: nextStatus, certificateIssuedDate: issuedDate } : item
-      );
-      setStudents(updated);
-      persistStudents(updated);
       if (nextStatus) {
         const notifPayload = {
           studentId: st.id, studentName: st.name, batch: st.batch,
@@ -781,8 +822,7 @@ export default function App() {
           date: issuedDate, time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
           timestamp: Date.now()
         };
-        const notifRef = await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
-        setStudentNotifications([{ id: notifRef.id, ...notifPayload }, ...studentNotifications]);
+        await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
         alert(`Certificate officially ISSUED to ${st.name}!`);
       } else {
         alert(`Certificate revoked for ${st.name}.`);
@@ -858,12 +898,8 @@ export default function App() {
     }
     try {
       const encryptedPayload = encryptRecordFields(pendingStudentData, STUDENT_ENCRYPTED_FIELDS);
-      const docRef = await addDoc(collection(db, STUDENTS_COL), encryptedPayload);
-      const created = { id: docRef.id, ...pendingStudentData };
-      const updatedList = [created, ...students];
-      setStudents(updatedList);
-      persistStudents(updatedList);
-      setShowOtpModal(false); setOtpInput(''); setRegisteredStudentObj(created);
+      await addDoc(collection(db, STUDENTS_COL), encryptedPayload);
+      setShowOtpModal(false); setOtpInput(''); setRegisteredStudentObj(pendingStudentData);
       setRegName(''); setRegGender('Male'); setRegDob(''); setRegPhone(''); setRegPassword(''); setRegDp(null);
     } catch (err) { alert('Error: ' + err.message); }
   };
@@ -886,9 +922,6 @@ export default function App() {
       const plainPayload = { phone: editPhone.trim(), password: editPassword.trim(), gender: editGender, dp: editDp };
       const encryptedPayload = encryptRecordFields(plainPayload, ['phone', 'password', 'gender', 'dp']);
       await updateDoc(doc(db, STUDENTS_COL, session.user.id), encryptedPayload);
-      const updated = students.map(st => st.id === session.user.id ? { ...st, ...plainPayload } : st);
-      setStudents(updated);
-      persistStudents(updated);
       setSession(prev => ({ ...prev, user: { ...prev.user, ...plainPayload } }));
       alert('Profile updated successfully.');
     } catch (err) { alert('Error: ' + err.message); }
@@ -952,13 +985,6 @@ export default function App() {
             faceSignatureCentered: encryptE2EE(JSON.stringify(masterCenterSig)),
             e2eeEncrypted: true
           });
-          const updated = students.map(st =>
-            st.id === selectedStudentIdForFace
-              ? { ...st, facePhoto: photoUrl, faceSignature: masterSignature, faceSignatureCentered: masterCenterSig }
-              : st
-          );
-          setStudents(updated);
-          persistStudents(updated);
           stopCameraStream();
           alert('Face registration completed. Student portal is now unlocked.');
         } catch (err) { setIsRegisteringFaceScan(false); alert('Error: ' + err.message); }
@@ -984,10 +1010,8 @@ export default function App() {
       const existing = feesRecords.find(f => f.studentId === managingFeeStudent.id && f.month === feeMonthInput);
       if (existing) {
         await updateDoc(doc(db, FEES_COL, existing.id), encryptedFeePayload);
-        setFeesRecords(feesRecords.map(f => f.id === existing.id ? { id: existing.id, ...feePayload } : f));
       } else {
-        const docRef = await addDoc(collection(db, FEES_COL), encryptedFeePayload);
-        setFeesRecords([{ id: docRef.id, ...feePayload }, ...feesRecords]);
+        await addDoc(collection(db, FEES_COL), encryptedFeePayload);
       }
       if (feeStatusInput === 'Paid') {
         const notifPayload = {
@@ -996,8 +1020,7 @@ export default function App() {
           message: `Your fee of ₹${feeAmountInput} for ${feeMonthInput} is marked PAID on ${paidDate} at ${paidTime}. Download your official signed bill from Fees & Bills!`,
           date: paidDate, time: paidTime, timestamp: Date.now()
         };
-        const notifRef = await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
-        setStudentNotifications([{ id: notifRef.id, ...notifPayload }, ...studentNotifications]);
+        await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
       }
       alert(`Fee record and official bill updated for ${managingFeeStudent.name}!`);
       setManagingFeeStudent(null);
@@ -1053,10 +1076,8 @@ export default function App() {
     }
   };
 
-  // --- UPDATED ATTENDANCE SCANNER LOGIC ---
   const openTeacherAttendanceScanner = () => {
     const todayIso = getTodayISO();
-    // Filter out students who are ALREADY marked present today
     const presentTodayIds = new Set(attendanceLogs.filter(l => l.isoDate === todayIso).map(l => l.studentId));
     const enrolled = students.filter(s => s.facePhoto && s.faceSignature && !presentTodayIds.has(s.id));
 
@@ -1089,7 +1110,6 @@ export default function App() {
             if (score < lowestScore) { lowestScore = score; bestMatch = st; }
           });
 
-          // ONLY ACCEPT IF SCORE IS BELOW THRESHOLD (Accurate Match)
           if (bestMatch && lowestScore < MATCH_THRESHOLD) {
             const now = new Date();
             setCapturedProofPhoto(capturePhotoDataUrl());
@@ -1099,7 +1119,6 @@ export default function App() {
               time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             });
             
-            // STOP CAMERA LOOP TO PREVENT FREEZING
             if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
             setIsScanning(false);
           } else if (skippedStudentIdsRef.current.length > 0) {
@@ -1113,7 +1132,6 @@ export default function App() {
   const handleNotMeCycleNext = () => {
     if (detectedStudent) skippedStudentIdsRef.current = [...skippedStudentIdsRef.current, detectedStudent.id];
     setDetectedStudent(null); setCapturedProofPhoto(null); setIsScanning(true);
-    // Restart the scanner loop
     openTeacherAttendanceScanner();
   };
 
@@ -1139,18 +1157,13 @@ export default function App() {
         date: displayDate, time: displayTime, timestamp: Date.now()
       };
       try {
-        const docRef = await addDoc(collection(db, ATTENDANCE_COL), encryptedRecord);
-        const notifRef = await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
-        
-        // Add to global state immediately so scanner filters them next time
-        setAttendanceLogs(prev => [{ id: docRef.id, ...plainRecord }, ...prev]);
-        setStudentNotifications(prev => [{ id: notifRef.id, ...notifPayload }, ...prev]);
+        await addDoc(collection(db, ATTENDANCE_COL), encryptedRecord);
+        await addDoc(collection(db, NOTIFICATIONS_COL), notifPayload);
         
         triggerDevicePushNotification(`Attendance Confirmed: ${detectedStudent.name} ✓`, `Today's attendance successfully marked at ${displayTime}.`);
         setIsSavingAttendance(false);
         alert(`Attendance marked successfully for ${detectedStudent.name}!`);
         
-        // Restart Scanner for next student
         skippedStudentIdsRef.current = [];
         setDetectedStudent(null); setCapturedProofPhoto(null); 
         openTeacherAttendanceScanner(); 
@@ -1169,12 +1182,10 @@ export default function App() {
     } else { saveToFirestore('Deep Education Center, Madanpur'); }
   };
 
-  // NEW: Mark Student Absent (Remove fake attendance)
   const handleMarkAttendanceAbsent = async (logId, studentName) => {
     if (!window.confirm(`Are you sure you want to mark ${studentName} as ABSENT and remove their attendance?`)) return;
     try {
       await deleteDoc(doc(db, ATTENDANCE_COL, logId));
-      setAttendanceLogs(prev => prev.filter(l => l.id !== logId));
       alert(`Attendance removed. ${studentName} is now marked ABSENT for today.`);
     } catch (err) { alert('Error removing attendance: ' + err.message); }
   };
@@ -1187,8 +1198,7 @@ export default function App() {
         time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
         timestamp: Date.now()
       };
-      const docRef = await addDoc(collection(db, NOTIFICATIONS_COL), notifData);
-      setStudentNotifications((current) => [{ id: docRef.id, ...notifData }, ...current]);
+      await addDoc(collection(db, NOTIFICATIONS_COL), notifData);
       triggerDevicePushNotification(titleText, bodyText);
     } catch (error) {
       console.error('Notification record could not be saved:', error);
@@ -1256,8 +1266,7 @@ export default function App() {
     };
     const encryptedPayload = encryptRecordFields(plainPayload, DOUBT_ENCRYPTED_FIELDS);
     try {
-      const docRef = await addDoc(collection(db, DOUBTS_COL), encryptedPayload);
-      setDoubtsList([{ id: docRef.id, ...plainPayload }, ...doubtsList]);
+      await addDoc(collection(db, DOUBTS_COL), encryptedPayload);
       setDoubtQuestionInput(''); setDoubtPhotoData(null);
     } catch (err) { alert('Error: ' + err.message); }
   };
@@ -1267,7 +1276,6 @@ export default function App() {
     if (!replyText || !replyText.trim()) return;
     try {
       await updateDoc(doc(db, DOUBTS_COL, doubtId), { teacherReply: encryptE2EE(replyText.trim()) });
-      setDoubtsList(doubtsList.map(d => d.id === doubtId ? { ...d, teacherReply: replyText.trim() } : d));
       alert('Teacher explanation added successfully!');
     } catch (e) { alert('Error: ' + e.message); }
   };
@@ -1280,8 +1288,7 @@ export default function App() {
       date: new Date().toLocaleDateString('en-IN')
     };
     try {
-      const docRef = await addDoc(collection(db, RECORDINGS_COL), payload);
-      setRecordedClasses([{ id: docRef.id, ...payload }, ...recordedClasses]);
+      await addDoc(collection(db, RECORDINGS_COL), payload);
       broadcastPushNotification("New Recorded Class Added 🎬", `${payload.title} is now available.`, payload.batch || 'ALL');
       setNewRecTitle(''); setNewRecUrl('');
     } catch (e) { alert('Error: ' + e.message); }
@@ -1289,7 +1296,6 @@ export default function App() {
 
   const handleDeleteRecordedClass = async (id) => {
     await deleteDoc(doc(db, RECORDINGS_COL, id));
-    setRecordedClasses(recordedClasses.filter(r => r.id !== id));
   };
 
   const handleChangeVideoSpeed = (speedVal) => {
@@ -1323,8 +1329,7 @@ export default function App() {
     };
     const encryptedPayload = encryptRecordFields(plainPayload, CHAT_ENCRYPTED_FIELDS);
     try {
-      const docRef = await addDoc(collection(db, LIVECHAT_COL), encryptedPayload);
-      setLiveChatMessages([...liveChatMessages, { id: docRef.id, ...plainPayload }]);
+      await addDoc(collection(db, LIVECHAT_COL), encryptedPayload);
       setChatInput('');
     } catch (e) {}
   };
@@ -1337,8 +1342,7 @@ export default function App() {
       votesA: 0, votesB: 0, votedIds: []
     };
     try {
-      const docRef = await addDoc(collection(db, POLLS_COL), payload);
-      setPollsList([{ id: docRef.id, ...payload }, ...pollsList]);
+      await addDoc(collection(db, POLLS_COL), payload);
       setNewPollQuestion(''); setNewPollOptA(''); setNewPollOptB('');
     } catch (e) {}
   };
@@ -1351,7 +1355,6 @@ export default function App() {
     const updatedVotedIds = [...(poll.votedIds || []), voterId];
     try {
       await updateDoc(doc(db, POLLS_COL, poll.id), { votesA: updatedVotesA, votesB: updatedVotesB, votedIds: updatedVotedIds });
-      setPollsList(pollsList.map(p => p.id === poll.id ? { ...p, votesA: updatedVotesA, votesB: updatedVotesB, votedIds: updatedVotedIds } : p));
     } catch (e) {}
   };
 
@@ -1427,12 +1430,10 @@ export default function App() {
       };
       if (isEditingTestId) {
         await updateDoc(doc(db, MOCKTEST_COL, isEditingTestId), payload);
-        setMockTests(mockTests.map(t => t.id === isEditingTestId ? { id: isEditingTestId, ...payload } : t));
         setIsEditingTestId(null);
         alert('Mock Test Updated Successfully!');
       } else {
-        const docRef = await addDoc(collection(db, MOCKTEST_COL), payload);
-        setMockTests([{ id: docRef.id, ...payload }, ...mockTests]);
+        await addDoc(collection(db, MOCKTEST_COL), payload);
         broadcastPushNotification("New Smart Quiz Published 📝", `Test title: ${payload.title}`, payload.batch || 'ALL');
         alert('Smart Quiz / Mock Test Published Successfully!');
       }
@@ -1452,7 +1453,6 @@ export default function App() {
     if (!window.confirm("Delete this test?")) return;
     try {
       await deleteDoc(doc(db, MOCKTEST_COL, id));
-      setMockTests(mockTests.filter(t => t.id !== id));
     } catch (e) { alert('Error: ' + e.message); }
   };
 
@@ -1485,7 +1485,6 @@ export default function App() {
       };
       const encryptedPayload = encryptRecordFields(plainPayload, FEEDBACK_ENCRYPTED_FIELDS);
       await addDoc(collection(db, FEEDBACK_COL), encryptedPayload);
-      setFeedbacksList([plainPayload, ...feedbacksList]);
       setFeedbackText('');
       alert('Thank you for your valuable feedback!');
     } catch (e) { alert('Error: ' + e.message); }
@@ -1618,7 +1617,6 @@ export default function App() {
       const snap = await getDocs(q).catch(() => ({ docs: [] }));
       await Promise.all(snap.docs.map((d) => deleteDoc(doc(db, 'pdf_chunks', d.id)))).catch(() => {});
       await deletePdfLocal(id).catch(() => {});
-      setPdfList((current) => current.filter((item) => item.id !== id));
     } catch (err) { alert(`PDF ডিলিট করা যায়নি: ${err.message}`); }
   };
 
@@ -1638,8 +1636,7 @@ export default function App() {
       batch: selectedBatchFilter || 'ALL'
     };
     try {
-      const docRef = await addDoc(collection(db, 'live_classes'), payload);
-      setLiveClasses([{ id: docRef.id, ...payload }, ...liveClasses]);
+      await addDoc(collection(db, 'live_classes'), payload);
       broadcastPushNotification("লাইভ ক্লাস শুরু হয়েছে! 🔴", `টপিক: ${payload.title}। এখনই পোর্টালে ঢুকে জয়েন করো!`, payload.batch);
       setNewClassTitle(''); setNewClassTime(''); setNewClassLink('');
       window.open(payload.link, '_blank', 'noopener,noreferrer');
@@ -1648,22 +1645,19 @@ export default function App() {
 
   const handleDeleteLiveClass = async (id) => {
     await deleteDoc(doc(db, 'live_classes', id));
-    setLiveClasses(liveClasses.filter(c => c.id !== id));
   };
 
   const handleAddNotice = async (e) => {
     e.preventDefault();
     if (!newNoticeTitle.trim() || !newNoticeContent.trim()) return;
     const payload = { title: newNoticeTitle.trim(), content: newNoticeContent.trim(), date: new Date().toLocaleDateString('en-IN') };
-    const docRef = await addDoc(collection(db, 'notices'), payload);
-    setNotices([{ id: docRef.id, ...payload }, ...notices]);
+    await addDoc(collection(db, 'notices'), payload);
     broadcastPushNotification("New Notice Published 🔔", `${payload.title}`);
     setNewNoticeTitle(''); setNewNoticeContent('');
   };
 
   const handleDeleteNotice = async (id) => {
     await deleteDoc(doc(db, 'notices', id));
-    setNotices(notices.filter(n => n.id !== id));
   };
 
   const filteredStudents = selectedBatchFilter === 'ALL' ? students : students.filter(s => s.batch === selectedBatchFilter);
@@ -1897,7 +1891,7 @@ export default function App() {
                 <p className="text-sm text-slate-300">
                   Welcome, <span className="text-amber-400 font-bold">{activeStudentRecord?.name}</span>! Contact the Teacher to register your Face ID.
                 </p>
-                <button onClick={fetchAllPortalData}
+                <button onClick={() => window.location.reload()}
                   className="shine-btn rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black px-6 py-3 text-xs inline-flex items-center gap-2 shadow-lg glow-amber">
                   <RefreshCw size={14} /> Check Status
                 </button>
@@ -2399,7 +2393,7 @@ export default function App() {
                 className="rounded-xl bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 px-3.5 py-2 text-xs font-bold">
                 <Key size={13} className="inline mr-1" /> PIN
               </button>
-              <button onClick={fetchAllPortalData}
+              <button onClick={() => window.location.reload()}
                 className="rounded-xl bg-white/5 text-slate-300 border border-white/10 px-3.5 py-2 text-xs font-bold">
                 <RefreshCw size={13} className="inline mr-1" /> Refresh
               </button>
@@ -2472,14 +2466,16 @@ export default function App() {
                             {st.certificateIssued && <span className="text-amber-400 font-bold">🎓 Cert</span>}
                           </div>
                         </div>
-                        <div className="flex gap-1.5 pt-2 border-t border-white/5">
+                        <div className="flex flex-wrap gap-1.5 pt-2 border-t border-white/5">
                           <button onClick={() => setManagingFeeStudent(st)}
-                            className="flex-1 rounded-lg bg-violet-500/15 text-violet-300 border border-violet-500/30 px-2 py-1.5 text-[11px] font-bold">Fees</button>
+                            className="flex-1 rounded-lg bg-violet-500/15 text-violet-300 border border-violet-500/30 px-2 py-1.5 text-[10px] font-bold">Add Fee</button>
+                          <button onClick={() => setViewingFeeHistoryStudent(st)}
+                            className="flex-1 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 px-2 py-1.5 text-[10px] font-bold flex items-center justify-center gap-1"><History size={10}/> History</button>
                           <button onClick={() => handleToggleIssueCertificate(st)}
-                            className={`flex-1 rounded-lg px-2 py-1.5 text-[11px] font-bold border ${
+                            className={`w-full mt-1 rounded-lg px-2 py-1.5 text-[10px] font-bold border ${
                               st.certificateIssued ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' : 'bg-emerald-500/80 text-slate-950 border-emerald-500'
                             }`}>
-                            {st.certificateIssued ? '✓ Issued' : '🎓 Issue'}
+                            {st.certificateIssued ? '✓ Issued' : '🎓 Issue Cert'}
                           </button>
                         </div>
                       </div>
@@ -2932,6 +2928,79 @@ export default function App() {
       </main>
 
       {/* MODALS */}
+      {viewingFeeHistoryStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
+          <div className="w-full max-w-2xl rounded-3xl glass-card p-6 md:p-8 shadow-2xl glow-violet space-y-5">
+            <div className="flex justify-between items-center border-b border-white/10 pb-4">
+              <div>
+                <h3 className="text-2xl font-black text-white flex items-center gap-2">
+                  <History className="text-violet-400" /> Fee History
+                </h3>
+                <p className="text-sm text-slate-300 mt-1">Student: <strong className="text-violet-300">{viewingFeeHistoryStudent.name}</strong></p>
+                <p className="text-xs text-slate-400">Batch: {viewingFeeHistoryStudent.batch}</p>
+              </div>
+              <button onClick={() => setViewingFeeHistoryStudent(null)}
+                className="rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/40 px-4 py-2 text-xs font-bold">Close</button>
+            </div>
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 p-4">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Total Paid</p>
+                <p className="text-2xl font-black text-white mt-1">
+                  ₹{feesRecords.filter(f => f.studentId === viewingFeeHistoryStudent.id && f.status === 'Paid').reduce((a, b) => a + b.amount, 0)}
+                </p>
+              </div>
+              <div className="rounded-2xl bg-rose-500/10 border border-rose-500/30 p-4">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-rose-400">Total Due</p>
+                <p className="text-2xl font-black text-white mt-1">
+                  ₹{feesRecords.filter(f => f.studentId === viewingFeeHistoryStudent.id && f.status === 'Due').reduce((a, b) => a + b.amount, 0)}
+                </p>
+              </div>
+            </div>
+
+            {/* History List */}
+            <div className="overflow-x-auto rounded-2xl border border-white/10 max-h-[400px]">
+              <table className="w-full text-left text-sm text-slate-300">
+                <thead className="bg-black/40 text-violet-300 uppercase text-[10px] border-b border-white/10 sticky top-0">
+                  <tr>
+                    <th className="p-3.5">Month</th>
+                    <th className="p-3.5">Amount</th>
+                    <th className="p-3.5">Status</th>
+                    <th className="p-3.5">Date / Receipt</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5 bg-black/20">
+                  {feesRecords
+                    .filter(f => f.studentId === viewingFeeHistoryStudent.id)
+                    .sort((a, b) => new Date(b.month) - new Date(a.month))
+                    .map(fee => (
+                    <tr key={fee.id} className="hover:bg-white/5">
+                      <td className="p-3.5 font-bold text-white">{fee.month}</td>
+                      <td className="p-3.5 text-white">₹{fee.amount}</td>
+                      <td className="p-3.5">
+                        <span className={`px-2.5 py-1 rounded text-[10px] font-bold ${fee.status === 'Paid' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'}`}>
+                          {fee.status}
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-[11px] text-slate-400">
+                        {fee.updatedAt || 'N/A'} <br/>
+                        <span className="text-[9px] text-slate-500 font-mono">{fee.receiptNo || 'No Receipt'}</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {feesRecords.filter(f => f.studentId === viewingFeeHistoryStudent.id).length === 0 && (
+                    <tr>
+                      <td colSpan="4" className="p-6 text-center text-slate-500 text-sm">No fee records found for this student.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showOtpModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md">
           <div className="w-full max-w-sm rounded-3xl glass-card p-8 shadow-2xl glow-violet space-y-6 text-center">

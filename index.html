@@ -11,5 +11,23 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+
+    <!-- Netlify Badge Hide Script -->
+    <script>
+      const removeNetlifyBadge = () => {
+        const badge = document.querySelector('iframe[src*="netlify"]') || 
+                      document.getElementById('netlify-badge') || 
+                      document.querySelector('[data-netlify-badge]');
+        if (badge) badge.remove();
+      };
+      
+      removeNetlifyBadge();
+      
+      const observer = new MutationObserver(() => {
+        removeNetlifyBadge();
+      });
+      
+      observer.observe(document.body, { childList: true, subtree: true });
+    </script>
   </body>
 </html>
